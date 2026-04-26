@@ -1,0 +1,17 @@
+node_modules/
+.expo/
+.env
+dist/
+build/
+esbuild/
+coverage/
+*.log
+# Ignore IDE specific files
+.vscode/    
+.idea/
+# Ignore OS specific files
+.DS_Store
+Thumbs.db
+expo-debug.log
+
+.expo/

@@ -1,0 +1,50 @@
+{
+  "expo": {
+    "name": "UniVerse",
+    "slug": "universe-au",
+    "scheme": "universe",
+    "version": "1.0.0",
+    "sdkVersion": "54.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#111F45"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.andhrauniversity.universe"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/icon.png",
+        "backgroundColor": "#111F45"
+      },
+      "package": "com.andhrauniversity.universe",
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/icon.png",
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-audio",
+      "expo-video",
+      "expo-web-browser",
+      "@react-native-google-signin/google-signin"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "1e32bf59-f3c3-4303-9a96-6dea8e17178d"
+      }
+    }
+  }
+}

@@ -1,0 +1,975 @@
+/**
+ * src/screens/faculty/AttendanceScreen.js
+ *
+ * Faculty Attendance Screen – calendar-driven date selection + timetable-driven slots.
+ *
+ * UPDATED FLOW:
+ *  1. On mount → default date = today; show "Select Date" button + date display.
+ *  2. Faculty taps "Select Date" → CalendarModal opens with full month view.
+ *  3. Faculty picks a date → calendar closes; selected date updates on screen.
+ *  4. App derives day-of-week from selected date → filters slots for that day.
+ *  5. Faculty taps a slot → GET /students?section=...&year=... loads student list.
+ *  6. Faculty toggles ✓ Present / ✗ Absent per student row.
+ *  7. Submit → POST /attendance with selectedDate in body → summary screen shown.
+ *  8. "Mark Another Class" resets back to slot list.
+ *
+ * FIX LOG:
+ *  - PROBLEM 1 (Student List):
+ *      • timeSlotToMinutes() now handles both "9:00-10:40" range format AND
+ *        "9:00 AM" / "1:30 PM" AM/PM format so slots sort chronologically.
+ *  - PROBLEM 2 (Student Sort + Field):
+ *      • Student map normalizes regnum: prefers s.regnum, falls back to
+ *        s.registration_number so whichever field the API returns is covered.
+ *      • Sort is numeric-aware on the trailing number in the reg number string.
+ *  - PROBLEM 3 (Full Name Display):
+ *      • Backend now returns "fullname" field alongside "name".
+ *      • All name render sites prefer item.fullname over item.name (nickname).
+ *      • Avatar initials also use fullname first.
+ *      • Summary absent list updated to show fullname.
+ *  - RENDERING FIX:
+ *      • if (selSlot) now guards ALL student-screen states (loading, empty, data).
+ *      • Prevents main screen and student screen from rendering simultaneously.
+ *
+ * New components:
+ *   CalendarModal  – src/components/faculty/CalendarModal.js
+ *   DateBanner     – inline, renders selected date + "Select Date" button
+ *   StuRow         – memoized student attendance row
+ */
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import {
+  View, Text, StyleSheet, FlatList, TouchableOpacity,
+  ScrollView, Alert, ActivityIndicator, Animated,
+} from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
+import { Ionicons } from '@expo/vector-icons';
+import { COLORS, FONTS, SPACING, RADIUS, SHADOWS } from '../../../constants/theme';
+import {
+  fetchMyTimetable,
+  fetchStudentsForSection,
+  submitAttendance,
+} from '../../services/attendanceService';
+import CalendarModal from '../../components/faculty/CalendarModal';
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+const DAY_ORDER = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+
+const todayStr = () => {
+  const t = new Date();
+  return `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,'0')}-${String(t.getDate()).padStart(2,'0')}`;
+};
+
+const dateToDayName = (dateStr) => {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dow = new Date(y, m - 1, d).getDay(); // 0=Sun
+  return DAY_ORDER[dow === 0 ? 6 : dow - 1] ?? 'Monday';
+};
+
+const formatDisplayDate = (dateStr) => {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString('en-IN', {
+    weekday: 'short', day: 'numeric', month: 'short', year: 'numeric',
+  });
+};
+
+// ─── FIX: timeSlotToMinutes ───────────────────────────────────────────────────
+const timeSlotToMinutes = (slot = '') => {
+  const startPart = slot.trim().split(/\s*-\s*(?=\d)/)[0].trim();
+
+  const ampmMatch = startPart.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+  if (ampmMatch) {
+    let h = parseInt(ampmMatch[1], 10);
+    const m = parseInt(ampmMatch[2], 10);
+    const period = ampmMatch[3].toUpperCase();
+    if (period === 'PM' && h !== 12) h += 12;
+    if (period === 'AM' && h === 12) h = 0;
+    return h * 60 + m;
+  }
+
+  const plainMatch = startPart.match(/^(\d{1,2}):(\d{2})$/);
+  if (plainMatch) {
+    return parseInt(plainMatch[1], 10) * 60 + parseInt(plainMatch[2], 10);
+  }
+
+  return 0;
+};
+
+// ─── Helper: resolve display name ─────────────────────────────────────────────
+const resolveDisplayName = (student) =>
+  ((student?.fullname || student?.name || 'Student') + '').toUpperCase();
+
+// ─── Helper: resolve avatar initial ──────────────────────────────────────────
+const resolveInitial = (student) =>
+  (student?.fullname || student?.name || '?')[0].toUpperCase();
+
+// ─── DateBanner Component ─────────────────────────────────────────────────────
+const DateBanner = React.memo(({ selectedDate, onOpenCalendar }) => {
+  const isToday = selectedDate === todayStr();
+  const scaleAnim = useRef(new Animated.Value(1)).current;
+
+  const pulse = () => {
+    Animated.sequence([
+      Animated.timing(scaleAnim, { toValue: 0.95, duration: 80, useNativeDriver: true }),
+      Animated.spring(scaleAnim, { toValue: 1, useNativeDriver: true, tension: 200 }),
+    ]).start();
+  };
+
+  return (
+    <View style={b.container}>
+      <View style={b.dateRow}>
+        <View style={b.calIcon}>
+          <Ionicons name="calendar" size={18} color={COLORS.primary} />
+        </View>
+        <View style={b.dateTextWrap}>
+          <Text style={b.dateLabel}>SELECTED DATE</Text>
+          <Text style={b.dateValue}>{formatDisplayDate(selectedDate)}</Text>
+        </View>
+        {isToday && (
+          <View style={b.todayChip}>
+            <Text style={b.todayChipTxt}>Today</Text>
+          </View>
+        )}
+      </View>
+      <Animated.View style={{ transform: [{ scale: scaleAnim }] }}>
+        <TouchableOpacity
+          style={b.selectBtn}
+          onPress={() => { pulse(); onOpenCalendar(); }}
+          activeOpacity={0.85}
+        >
+          <Ionicons name="calendar-outline" size={15} color={COLORS.accent} />
+          <Text style={b.selectBtnTxt}>Select Date</Text>
+          <Ionicons name="chevron-down" size={13} color={COLORS.accent} />
+        </TouchableOpacity>
+      </Animated.View>
+    </View>
+  );
+});
+
+// ─── Student Row – memoized ───────────────────────────────────────────────────
+const StuRow = React.memo(({ item, index, onToggle }) => {
+  const isP = item.present === true;
+  const isA = item.present === false;
+  const isU = item.present === null;
+
+  const scaleAnim = useRef(new Animated.Value(1)).current;
+
+  const bump = () => {
+    Animated.sequence([
+      Animated.timing(scaleAnim, { toValue: 0.97, duration: 60, useNativeDriver: true }),
+      Animated.spring(scaleAnim, { toValue: 1, useNativeDriver: true, tension: 200 }),
+    ]).start();
+  };
+
+  const handlePress = () => {
+    if (isU) onToggle(item.id, true);      // Unmarked → Present
+    else if (isP) onToggle(item.id, false); // Present → Absent
+    else onToggle(item.id, null);          // Absent → Unmarked
+  };
+
+  return (
+    <Animated.View style={[s.stuCard, { transform: [{ scale: scaleAnim }] }]}>
+
+      <View style={[
+        s.stuStatusBar,
+        isP && { backgroundColor: COLORS.success },
+        isA && { backgroundColor: COLORS.danger },
+        isU && { backgroundColor: COLORS.cardBorder },
+      ]} />
+
+      <View style={s.stuLeft}>
+        <View style={s.stuAvatar}>
+          <Text style={s.stuAvatarTxt}>
+            {(item.fullname || item.name || '?')[0].toUpperCase()}
+          </Text>
+        </View>
+
+        <View style={s.stuInfo}>
+          <Text style={s.stuRoll}>
+            {item.regnum || `#${index + 1}`}
+          </Text>
+
+          <Text style={s.stuName}>
+            {(item.fullname || item.name || 'Student').toUpperCase()}
+          </Text>
+        </View>
+      </View>
+
+      {/* 🔥 SINGLE BUTTON TOGGLE */}
+      <TouchableOpacity
+        style={[
+          s.tag,
+          isP && s.tagPresent,
+          isA && s.tagAbsent,
+          isU && s.tagUnmarked,
+        ]}
+        onPress={() => { bump(); handlePress(); }}
+        activeOpacity={0.8}
+      >
+        <Text style={[
+          s.tagText,
+          isP && s.tagTextPresent,
+          isA && s.tagTextAbsent,
+          isU && s.tagTextUnmarked,
+        ]}>
+          {isP ? 'Present' : isA ? 'Absent' : 'Mark'}
+        </Text>
+      </TouchableOpacity>
+
+    </Animated.View>
+  );
+});
+
+// ─── Main Screen ──────────────────────────────────────────────────────────────
+export default function FacultyAttendanceScreen() {
+  // Date + calendar
+  const [selectedDate,   setSelectedDate]   = useState(todayStr());
+  const [calendarOpen,   setCalendarOpen]   = useState(false);
+
+  // Timetable
+  const [timetable,      setTimetable]      = useState([]);
+  const [ttLoading,      setTtLoading]      = useState(true);
+  const [ttError,        setTtError]        = useState(null);
+
+  // Slot + students
+  const [selSlot,        setSelSlot]        = useState(null);
+  const [studentsArr,    setStudentsArr]    = useState([]);
+  const [stuLoading,     setStuLoading]     = useState(false);
+
+  // Submit
+  const [submitting,     setSubmitting]     = useState(false);
+  const [showSummary,    setShowSummary]    = useState(false);
+  const [summaryData,    setSummaryData]    = useState(null);
+
+  // Load full timetable once
+  useEffect(() => {
+    let cancelled = false;
+    setTtLoading(true); setTtError(null);
+    fetchMyTimetable()
+      .then(data => { if (!cancelled) setTimetable(Array.isArray(data) ? data : []); })
+      .catch(err  => { if (!cancelled) setTtError(err?.message || 'Failed to load timetable'); })
+      .finally(()  => { if (!cancelled) setTtLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Day name derived from selected date
+  const activeDayName = useMemo(() => dateToDayName(selectedDate), [selectedDate]);
+
+  const slotsForDay = useMemo(() =>
+    timetable
+      .filter(e => e.day === activeDayName)
+      .sort((a, b) => timeSlotToMinutes(a.time_slot) - timeSlotToMinutes(b.time_slot)),
+    [timetable, activeDayName]
+  );
+
+  // Handle calendar date pick
+  const handleDateSelect = useCallback((dateStr) => {
+    setSelectedDate(dateStr);
+    setSelSlot(null);
+    setStudentsArr([]);
+    setCalendarOpen(false);
+  }, []);
+
+  // Load students when slot selected
+  useEffect(() => {
+    if (!selSlot) { setStudentsArr([]); return; }
+    let cancelled = false;
+    setStuLoading(true); setStudentsArr([]);
+    fetchStudentsForSection(selSlot.section, selSlot.year)
+      .then(data => {
+        if (!cancelled) {
+          const sorted = (Array.isArray(data) ? data : [])
+            .map(st => ({
+              ...st,
+              present: null,
+              regnum: (st.regnum || st.registration_number || '').trim(),
+              fullname: st.fullname,
+            }))
+            .sort((a, b) => {
+              const rA = a.regnum.toUpperCase();
+              const rB = b.regnum.toUpperCase();
+              const numA = rA.match(/(\d+)$/)?.[1];
+              const numB = rB.match(/(\d+)$/)?.[1];
+              if (numA && numB) {
+                const prefixA = rA.slice(0, rA.length - numA.length);
+                const prefixB = rB.slice(0, rB.length - numB.length);
+                if (prefixA === prefixB) return parseInt(numA, 10) - parseInt(numB, 10);
+              }
+              return rA.localeCompare(rB);
+            });
+          setStudentsArr(sorted);
+        }
+      })
+      .catch(err => {
+        if (!cancelled) {
+          Alert.alert('Error', err?.message || 'Failed to load students');
+          setStudentsArr([]);
+        }
+      })
+      .finally(() => { if (!cancelled) setStuLoading(false); });
+    return () => { cancelled = true; };
+  }, [selSlot]);
+
+  const handleToggle = useCallback((id, val) => {
+    setStudentsArr(prev =>
+      prev.map(st => st.id === id ? { ...st, present: st.present === val ? null : val } : st)
+    );
+  }, []);
+
+  const presentCount  = studentsArr.filter(s => s.present === true).length;
+  const absentCount   = studentsArr.filter(s => s.present === false).length;
+  const unmarkedCount = studentsArr.filter(s => s.present === null).length;
+  const allMarked     = studentsArr.length > 0 && unmarkedCount === 0;
+
+  const handleSubmit = useCallback(async () => {
+    if (!allMarked) {
+      Alert.alert('Incomplete',
+        `${unmarkedCount} student(s) not marked yet. Please mark all before submitting.`);
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await submitAttendance(
+        selSlot.subject, selSlot.section, selSlot.year,
+        selectedDate,
+        selSlot.time_slot, selSlot.faculty_id, studentsArr,
+      );
+      setSummaryData({
+        subject: selSlot.subject, section: selSlot.section,
+        time_slot: selSlot.time_slot, date: selectedDate,
+        displayDate: formatDisplayDate(selectedDate),
+        present: presentCount, absent: absentCount,
+        total: studentsArr.length, absentList: studentsArr.filter(s => !s.present),
+      });
+      setShowSummary(true);
+    } catch (e) {
+      Alert.alert('Submit Failed', e?.message || 'Could not submit. Please try again.');
+    } finally {
+      setSubmitting(false);
+    }
+  }, [allMarked, studentsArr, selSlot, selectedDate, presentCount, absentCount, unmarkedCount]);
+
+  const resetAll = () => {
+    setSelSlot(null); setStudentsArr([]);
+    setShowSummary(false); setSummaryData(null);
+  };
+
+  // ══ SUMMARY SCREEN ═══════════════════════════════════════════════════════
+  if (showSummary && summaryData) {
+    const pct = summaryData.total > 0
+      ? Math.round(summaryData.present / summaryData.total * 100) : 0;
+    return (
+      <View style={{ flex: 1, backgroundColor: COLORS.bgLight }}>
+        <LinearGradient colors={[COLORS.primary, COLORS.primaryMid]} style={s.header}>
+          <Text style={s.headerTitle}>Attendance</Text>
+          <Text style={s.headerSub}>Submitted ✓</Text>
+        </LinearGradient>
+        <ScrollView contentContainerStyle={{ padding: SPACING.lg, paddingBottom: 100 }}
+          showsVerticalScrollIndicator={false}>
+          <View style={s.summBadge}>
+            <View style={s.summCircle}>
+              <Ionicons name="checkmark-circle" size={52} color={COLORS.success} />
+            </View>
+            <Text style={s.summTitle}>Attendance Submitted</Text>
+            <Text style={s.summSub}>{summaryData.subject} · {summaryData.time_slot}</Text>
+            <Text style={s.summSub2}>{summaryData.section}</Text>
+            <View style={s.summDateChip}>
+              <Ionicons name="calendar" size={13} color={COLORS.primary} />
+              <Text style={s.summDateTxt}>{summaryData.displayDate}</Text>
+            </View>
+          </View>
+          <View style={s.statsRow}>
+            {[
+              { label: 'Present',  val: summaryData.present, color: COLORS.success },
+              { label: 'Absent',   val: summaryData.absent,  color: COLORS.danger  },
+              { label: 'Present%', val: `${pct}%`,           color: COLORS.primary },
+            ].map(item => (
+              <View key={item.label} style={[s.statBox, { borderColor: item.color }]}>
+                <Text style={[s.statVal, { color: item.color }]}>{item.val}</Text>
+                <Text style={s.statLbl}>{item.label}</Text>
+              </View>
+            ))}
+          </View>
+          {summaryData.absentList.length > 0 && (
+            <View style={s.absentCard}>
+              <Text style={s.absentCardTitle}>Absent Students ({summaryData.absentList.length})</Text>
+              {summaryData.absentList.map((st, i) => (
+                <View key={st.id} style={[s.absentRow, i === summaryData.absentList.length - 1 && { borderBottomWidth: 0 }]}>
+                  <View style={s.absentAvatar}>
+                    <Text style={s.absentAvatarTxt}>{resolveInitial(st)}</Text>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.absentRoll}>{st.regnum || ''}</Text>
+                    <Text style={s.absentName}>{resolveDisplayName(st)}</Text>
+                  </View>
+                  <View style={s.absentBadge}>
+                    <Text style={s.absentBadgeTxt}>Absent</Text>
+                  </View>
+                </View>
+              ))}
+            </View>
+          )}
+          <TouchableOpacity style={s.doneBtn} onPress={resetAll}>
+            <Ionicons name="arrow-back-circle-outline" size={20} color={COLORS.accent} />
+            <Text style={s.doneBtnTxt}>Mark Another Class</Text>
+          </TouchableOpacity>
+        </ScrollView>
+      </View>
+    );
+  }
+
+  // ══ SLOT SELECTED — handles loading / empty / student list ════════════════
+  if (selSlot) {
+
+    // ── Loading state ────────────────────────────────────────────────────────
+    if (stuLoading) {
+      return (
+        <View style={{ flex: 1, backgroundColor: COLORS.bgLight }}>
+          <LinearGradient colors={[COLORS.primary, COLORS.primaryMid]} style={s.header}>
+            <Text style={s.headerTitle}>Mark Attendance</Text>
+            <Text style={s.headerSub}>{formatDisplayDate(selectedDate)}</Text>
+          </LinearGradient>
+          <View style={s.centerWrap}>
+            <ActivityIndicator color={COLORS.primary} size="large" />
+            <Text style={s.loadTxt}>Loading students…</Text>
+          </View>
+        </View>
+      );
+    }
+
+    // ── Empty state ──────────────────────────────────────────────────────────
+    if (studentsArr.length === 0) {
+      return (
+        <View style={{ flex: 1, backgroundColor: COLORS.bgLight }}>
+          <LinearGradient colors={[COLORS.primary, COLORS.primaryMid]} style={s.header}>
+            <Text style={s.headerTitle}>Mark Attendance</Text>
+            <Text style={s.headerSub}>{formatDisplayDate(selectedDate)}</Text>
+          </LinearGradient>
+          <View style={s.centerWrap}>
+            <Ionicons name="people-outline" size={40} color={COLORS.textMuted} />
+            <Text style={s.emptyTxt}>No students found for section {selSlot.section}.</Text>
+            <TouchableOpacity onPress={() => setSelSlot(null)}>
+              <Text style={{ color: COLORS.primary, fontWeight: '700', marginTop: 8 }}>← Go Back</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      );
+    }
+
+    // ── Data state — student list ────────────────────────────────────────────
+    return (
+      <View style={{ flex: 1, backgroundColor: COLORS.bgLight }}>
+        <LinearGradient colors={[COLORS.primary, COLORS.primaryMid]} style={s.header}>
+          <Text style={s.headerTitle}>Mark Attendance</Text>
+          <Text style={s.headerSub}>{formatDisplayDate(selectedDate)}</Text>
+        </LinearGradient>
+        <View style={s.classHead}>
+          <TouchableOpacity onPress={() => setSelSlot(null)} style={s.backBtn}>
+            <Ionicons name="arrow-back" size={20} color={COLORS.textPrimary} />
+          </TouchableOpacity>
+          <View style={{ flex: 1 }}>
+            <Text style={s.classHeadTitle}>{selSlot.subject}</Text>
+            <Text style={s.classHeadMeta}>
+              {selSlot.section}{selSlot.year ? ` · Year ${selSlot.year}` : ''} · {selSlot.time_slot}
+            </Text>
+          </View>
+          <View style={s.presPill}>
+            <Text style={s.presPillTxt}>{presentCount}/{studentsArr.length}</Text>
+          </View>
+        </View>
+        {unmarkedCount > 0 && (
+          <View style={s.warnBanner}>
+            <Ionicons name="warning-outline" size={14} color={COLORS.warning} />
+            <Text style={s.warnTxt}>
+              {unmarkedCount} student{unmarkedCount > 1 ? 's' : ''} not yet marked
+            </Text>
+          </View>
+        )}
+        <View style={s.strip}>
+          {[
+            { label: 'Present',  count: presentCount,  color: COLORS.success   },
+            { label: 'Absent',   count: absentCount,   color: COLORS.danger    },
+            { label: 'Unmarked', count: unmarkedCount, color: COLORS.textMuted },
+          ].map((item, i) => (
+            <React.Fragment key={item.label}>
+              {i > 0 && <View style={s.stripSep} />}
+              <View style={s.stripItem}>
+                <View style={[s.stripDot, { backgroundColor: item.color }]} />
+                <Text style={s.stripLbl}>{item.label}</Text>
+                <Text style={[s.stripVal, { color: item.color }]}>{item.count}</Text>
+              </View>
+            </React.Fragment>
+          ))}
+        </View>
+        <FlatList
+          data={studentsArr}
+          keyExtractor={item => item.id}
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={{ paddingHorizontal: SPACING.md, paddingTop: SPACING.sm, paddingBottom: 120 }}
+          ItemSeparatorComponent={() => <View style={{ height: 6 }} />}
+          renderItem={({ item, index }) => (
+            <StuRow item={item} index={index} onToggle={handleToggle} />
+          )}
+        />
+        <View style={s.submitFooter}>
+          <TouchableOpacity
+            style={[s.submitBtn, (!allMarked || submitting) && s.submitBtnDisabled]}
+            onPress={handleSubmit}
+            activeOpacity={allMarked ? 0.88 : 1}
+          >
+            <Ionicons name="checkmark-circle-outline" size={20} color="#fff" />
+            <Text style={s.submitTxt}>
+              {submitting ? 'Submitting…'
+                : allMarked ? `Submit · ${studentsArr.length} students`
+                : `${unmarkedCount} unmarked — cannot submit`}
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
+
+  // ══ MAIN SCREEN — date selector + slot list ═══════════════════════════════
+  return (
+    <View style={{ flex: 1, backgroundColor: COLORS.bgLight }}>
+
+      {/* Calendar modal */}
+      <CalendarModal
+        visible={calendarOpen}
+        selectedDate={selectedDate}
+        onSelect={handleDateSelect}
+        onClose={() => setCalendarOpen(false)}
+        maxDate={todayStr()}
+      />
+
+      {/* Header */}
+      <LinearGradient colors={[COLORS.primary, COLORS.primaryMid]} style={s.header}>
+        <Text style={s.headerTitle}>Attendance</Text>
+        <Text style={s.headerSub}>Select a class to mark</Text>
+      </LinearGradient>
+
+      {/* Date Banner */}
+      <DateBanner
+        selectedDate={selectedDate}
+        onOpenCalendar={() => setCalendarOpen(true)}
+      />
+
+      {/* Loading */}
+      {ttLoading && (
+        <View style={s.centerWrap}>
+          <ActivityIndicator color={COLORS.primary} size="large" />
+          <Text style={s.loadTxt}>Loading timetable…</Text>
+        </View>
+      )}
+
+      {/* Error */}
+      {!ttLoading && ttError && (
+        <View style={s.centerWrap}>
+          <Ionicons name="alert-circle-outline" size={40} color={COLORS.danger} />
+          <Text style={[s.emptyTxt, { color: COLORS.danger }]}>{ttError}</Text>
+        </View>
+      )}
+
+      {/* Empty timetable */}
+      {!ttLoading && !ttError && timetable.length === 0 && (
+        <View style={s.centerWrap}>
+          <Ionicons name="calendar-outline" size={40} color={COLORS.textMuted} />
+          <Text style={s.emptyTxt}>No timetable entries found.</Text>
+        </View>
+      )}
+
+      {/* Timetable loaded */}
+      {!ttLoading && !ttError && timetable.length > 0 && (
+        <ScrollView
+          contentContainerStyle={{ padding: SPACING.md, paddingBottom: 110 }}
+          showsVerticalScrollIndicator={false}
+        >
+          {/* Day heading */}
+          <View style={s.dayRow}>
+            <View style={s.dayDot} />
+            <Text style={s.dayTitle}>{activeDayName} classes</Text>
+            {slotsForDay.length > 0 && (
+              <View style={s.dayCountChip}>
+                <Text style={s.dayCountTxt}>
+                  {slotsForDay.length} class{slotsForDay.length !== 1 ? 'es' : ''}
+                </Text>
+              </View>
+            )}
+          </View>
+
+          {/* No classes empty state */}
+          {slotsForDay.length === 0 ? (
+            <View style={s.noClassCard}>
+              <Ionicons name="time-outline" size={44} color={COLORS.textMuted} />
+              <Text style={s.noClassTitle}>No classes scheduled</Text>
+              <Text style={s.noClassSub}>
+                No classes on {activeDayName} ({formatDisplayDate(selectedDate)}).{'\n'}
+                Try selecting a different date.
+              </Text>
+              <TouchableOpacity
+                style={s.changeDateBtn}
+                onPress={() => setCalendarOpen(true)}
+                activeOpacity={0.8}
+              >
+                <Ionicons name="calendar-outline" size={15} color={COLORS.accent} />
+                <Text style={s.changeDateTxt}>Change Date</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            slotsForDay.map(slot => (
+              <TouchableOpacity
+                key={slot.id}
+                style={s.schedCard}
+                onPress={() => setSelSlot(slot)}
+                activeOpacity={0.85}
+              >
+                <View style={s.schedBadge}>
+                  <Ionicons name="time-outline" size={12} color={COLORS.accent} style={{ marginBottom: 3 }} />
+                  <Text style={s.schedBadgeTxt}>{slot.time_slot}</Text>
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={s.schedSubject}>{slot.subject}</Text>
+                  <Text style={s.schedMeta}>
+                    {slot.section}{slot.year ? ` · Year ${slot.year}` : ''}
+                  </Text>
+                </View>
+                <View style={s.schedArrow}>
+                  <Ionicons name="chevron-forward" size={18} color={COLORS.primary} />
+                </View>
+              </TouchableOpacity>
+            ))
+          )}
+        </ScrollView>
+      )}
+    </View>
+  );
+}
+
+// ─── DateBanner Styles ─────────────────────────────────────────────────────────
+const b = StyleSheet.create({
+  container: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    backgroundColor: COLORS.cardBg, borderBottomWidth: 1, borderBottomColor: COLORS.cardBorder,
+    paddingHorizontal: SPACING.md, paddingVertical: SPACING.sm + 2,
+    gap: SPACING.sm, ...SHADOWS.card, shadowOpacity: 0.04, elevation: 2,
+  },
+  dateRow:       { flexDirection: 'row', alignItems: 'center', flex: 1, gap: SPACING.sm },
+  calIcon:       { width: 36, height: 36, borderRadius: RADIUS.md, backgroundColor: COLORS.primary + '12', alignItems: 'center', justifyContent: 'center' },
+  dateTextWrap:  { flex: 1 },
+  dateLabel:     { fontSize: FONTS.sizes.xs - 1, color: COLORS.textMuted, fontWeight: '700', letterSpacing: 0.6, textTransform: 'uppercase' },
+  dateValue:     { fontSize: FONTS.sizes.sm, fontWeight: '800', color: COLORS.textPrimary, marginTop: 1 },
+  todayChip:     { backgroundColor: COLORS.success + '18', paddingHorizontal: 8, paddingVertical: 3, borderRadius: RADIUS.full, borderWidth: 1, borderColor: COLORS.success + '40' },
+  todayChipTxt:  { fontSize: 10, fontWeight: '800', color: COLORS.success, letterSpacing: 0.3 },
+  selectBtn:     { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: COLORS.primary, paddingHorizontal: 11, paddingVertical: 9, borderRadius: RADIUS.md, ...SHADOWS.button, shadowOpacity: 0.2 },
+  selectBtnTxt:  { fontSize: FONTS.sizes.xs, fontWeight: '800', color: COLORS.accent, letterSpacing: 0.3 },
+});
+
+// ─── Screen Styles ─────────────────────────────────────────────────────────────
+const s = StyleSheet.create({
+
+  header: { paddingTop: 62, paddingBottom: SPACING.lg, paddingHorizontal: SPACING.lg },
+  headerTitle: { fontSize: FONTS.sizes.xxxl, fontWeight: '900', color: COLORS.secondary },
+  headerSub: { fontSize: FONTS.sizes.sm, color: 'rgba(255,255,255,0.6)', marginTop: 4 },
+
+  centerWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: SPACING.sm },
+  loadTxt: { fontSize: FONTS.sizes.sm, color: COLORS.textMuted },
+  emptyWrap: { alignItems: 'center', paddingTop: 48, gap: SPACING.sm },
+  emptyTxt: { fontSize: FONTS.sizes.md, color: COLORS.textMuted, textAlign: 'center' },
+
+  // Day row
+  dayRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: SPACING.md },
+  dayDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: COLORS.primary },
+  dayTitle: { fontSize: FONTS.sizes.lg, fontWeight: '800', color: COLORS.textPrimary, flex: 1 },
+  dayCountChip: { backgroundColor: COLORS.primary + '12', paddingHorizontal: 10, paddingVertical: 4, borderRadius: RADIUS.full },
+  dayCountTxt: { fontSize: FONTS.sizes.xs, fontWeight: '700', color: COLORS.primary },
+
+  // Slot card
+  schedCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.cardBg,
+    borderRadius: RADIUS.lg,
+    padding: SPACING.md,
+    marginBottom: SPACING.sm,
+    ...SHADOWS.card,
+    borderWidth: 1,
+    borderColor: COLORS.cardBorder,
+    gap: 14,
+  },
+  schedBadge: {
+    backgroundColor: COLORS.primary,
+    borderRadius: RADIUS.md,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    minWidth: 90,
+    alignItems: 'center',
+  },
+  schedBadgeTxt: { fontSize: 11, fontWeight: '800', color: COLORS.accent },
+  schedSubject: { fontSize: FONTS.sizes.md, fontWeight: '800', color: COLORS.textPrimary },
+  schedMeta: { fontSize: FONTS.sizes.xs, color: COLORS.textMuted, marginTop: 3 },
+  schedArrow: {},
+
+  // Student row
+  stuCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.cardBg,
+    borderRadius: RADIUS.md,
+    paddingVertical: 11,
+    paddingHorizontal: SPACING.md,
+    ...SHADOWS.card,
+    borderWidth: 0.5,
+    borderColor: COLORS.cardBorder,
+    overflow: 'hidden',
+  },
+
+  stuStatusBar: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    width: 4,
+    borderTopLeftRadius: RADIUS.md,
+    borderBottomLeftRadius: RADIUS.md,
+  },
+
+  stuLeft: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.sm,
+  },
+
+  stuAvatar: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: COLORS.primary + '14',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  stuAvatarTxt: {
+    fontSize: FONTS.sizes.md,
+    fontWeight: '800',
+    color: COLORS.primary,
+  },
+
+  stuInfo: { flex: 1 },
+
+  stuRoll: {
+    fontSize: FONTS.sizes.xs,
+    fontWeight: '800',
+    color: COLORS.primary,
+    letterSpacing: 0.5,
+  },
+
+  stuName: {
+    fontSize: FONTS.sizes.sm,
+    fontWeight: '600',
+    color: COLORS.textPrimary,
+    marginTop: 1,
+  },
+
+  // 🔥 SINGLE BUTTON STYLES
+  tag: {
+    paddingHorizontal: 16,
+    paddingVertical: 7,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  tagPresent: {
+    backgroundColor: '#22C55E',
+  },
+
+  tagAbsent: {
+    backgroundColor: '#EF4444',
+  },
+
+  tagUnmarked: {
+    borderWidth: 1.5,
+    borderColor: '#CBD5E1',
+    backgroundColor: '#F8FAFC',
+  },
+
+  tagText: {
+    fontSize: 12,
+    fontWeight: '700',
+  },
+
+  tagTextPresent: {
+    color: '#fff',
+  },
+
+  tagTextAbsent: {
+    color: '#fff',
+  },
+
+  tagTextUnmarked: {
+    color: '#94A3B8',
+  },
+
+  // Submit
+  submitFooter: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: COLORS.cardBg,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.cardBorder,
+    padding: SPACING.md,
+  },
+
+  submitBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: SPACING.sm,
+    backgroundColor: COLORS.primary,
+    borderRadius: RADIUS.lg,
+    paddingVertical: 15,
+  },
+
+  submitBtnDisabled: {
+    backgroundColor: COLORS.textMuted,
+    opacity: 0.6,
+  },
+
+  submitTxt: {
+    fontSize: FONTS.sizes.md,
+    fontWeight: '800',
+    color: COLORS.accent,
+  },
+
+  // Class header (student screen)
+  classHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.sm,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm + 2,
+    backgroundColor: COLORS.cardBg,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.cardBorder,
+    ...SHADOWS.card,
+    shadowOpacity: 0.04,
+    elevation: 2,
+  },
+  backBtn: {
+    width: 36, height: 36, borderRadius: RADIUS.md,
+    backgroundColor: COLORS.bgLight,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  classHeadTitle: { fontSize: FONTS.sizes.md, fontWeight: '800', color: COLORS.textPrimary },
+  classHeadMeta:  { fontSize: FONTS.sizes.xs, color: COLORS.textMuted, marginTop: 2 },
+  presPill: {
+    backgroundColor: COLORS.primary + '14',
+    paddingHorizontal: 10, paddingVertical: 5,
+    borderRadius: RADIUS.full,
+  },
+  presPillTxt: { fontSize: FONTS.sizes.xs, fontWeight: '800', color: COLORS.primary },
+
+  // Warning banner
+  warnBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: COLORS.warning + '18',
+    paddingHorizontal: SPACING.md, paddingVertical: 8,
+    borderBottomWidth: 1, borderBottomColor: COLORS.warning + '30',
+  },
+  warnTxt: { fontSize: FONTS.sizes.xs, fontWeight: '600', color: COLORS.warning },
+
+  // Stats strip
+  strip: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: COLORS.cardBg,
+    paddingHorizontal: SPACING.md, paddingVertical: SPACING.sm,
+    borderBottomWidth: 1, borderBottomColor: COLORS.cardBorder,
+  },
+  stripSep:  { width: 1, height: 24, backgroundColor: COLORS.cardBorder, marginHorizontal: SPACING.sm },
+  stripItem: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 5 },
+  stripDot:  { width: 7, height: 7, borderRadius: 4 },
+  stripLbl:  { fontSize: FONTS.sizes.xs, color: COLORS.textMuted, fontWeight: '600', flex: 1 },
+  stripVal:  { fontSize: FONTS.sizes.sm, fontWeight: '800' },
+
+  // Summary screen
+  summBadge: {
+    alignItems: 'center', backgroundColor: COLORS.cardBg,
+    borderRadius: RADIUS.xl, padding: SPACING.xl,
+    marginBottom: SPACING.lg, ...SHADOWS.card,
+    borderWidth: 1, borderColor: COLORS.cardBorder,
+  },
+  summCircle: {
+    width: 80, height: 80, borderRadius: 40,
+    backgroundColor: COLORS.success + '14',
+    alignItems: 'center', justifyContent: 'center',
+    marginBottom: SPACING.md,
+  },
+  summTitle:   { fontSize: FONTS.sizes.xl, fontWeight: '900', color: COLORS.textPrimary, textAlign: 'center' },
+  summSub:     { fontSize: FONTS.sizes.sm, color: COLORS.textMuted, marginTop: 4, textAlign: 'center' },
+  summSub2:    { fontSize: FONTS.sizes.xs, color: COLORS.textMuted, marginTop: 2, textAlign: 'center' },
+  summDateChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    backgroundColor: COLORS.primary + '12',
+    paddingHorizontal: 10, paddingVertical: 5,
+    borderRadius: RADIUS.full, marginTop: SPACING.sm,
+  },
+  summDateTxt: { fontSize: FONTS.sizes.xs, fontWeight: '700', color: COLORS.primary },
+
+  statsRow: { flexDirection: 'row', gap: SPACING.sm, marginBottom: SPACING.lg },
+  statBox: {
+    flex: 1, alignItems: 'center', backgroundColor: COLORS.cardBg,
+    borderRadius: RADIUS.lg, padding: SPACING.md,
+    borderWidth: 1.5, ...SHADOWS.card,
+  },
+  statVal: { fontSize: FONTS.sizes.xxl, fontWeight: '900' },
+  statLbl: { fontSize: FONTS.sizes.xs, color: COLORS.textMuted, fontWeight: '600', marginTop: 2 },
+
+  absentCard: {
+    backgroundColor: COLORS.cardBg, borderRadius: RADIUS.lg,
+    padding: SPACING.md, marginBottom: SPACING.lg,
+    ...SHADOWS.card, borderWidth: 1, borderColor: COLORS.cardBorder,
+  },
+  absentCardTitle: { fontSize: FONTS.sizes.md, fontWeight: '800', color: COLORS.textPrimary, marginBottom: SPACING.sm },
+  absentRow: {
+    flexDirection: 'row', alignItems: 'center', gap: SPACING.sm,
+    paddingVertical: SPACING.sm,
+    borderBottomWidth: 1, borderBottomColor: COLORS.cardBorder,
+  },
+  absentAvatar: {
+    width: 34, height: 34, borderRadius: 17,
+    backgroundColor: COLORS.danger + '14',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  absentAvatarTxt: { fontSize: FONTS.sizes.sm, fontWeight: '800', color: COLORS.danger },
+  absentRoll:      { fontSize: FONTS.sizes.xs, fontWeight: '700', color: COLORS.primary },
+  absentName:      { fontSize: FONTS.sizes.sm, fontWeight: '600', color: COLORS.textPrimary },
+  absentBadge: {
+    backgroundColor: COLORS.danger + '14', paddingHorizontal: 8, paddingVertical: 3,
+    borderRadius: RADIUS.full,
+  },
+  absentBadgeTxt: { fontSize: 10, fontWeight: '800', color: COLORS.danger },
+
+  doneBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: SPACING.sm, backgroundColor: COLORS.primary,
+    borderRadius: RADIUS.lg, paddingVertical: 15,
+  },
+  doneBtnTxt: { fontSize: FONTS.sizes.md, fontWeight: '800', color: COLORS.accent },
+
+  // No class / no timetable card
+  noClassCard: {
+    alignItems: 'center', backgroundColor: COLORS.cardBg,
+    borderRadius: RADIUS.xl, padding: SPACING.xl,
+    borderWidth: 1, borderColor: COLORS.cardBorder, ...SHADOWS.card,
+    gap: SPACING.sm,
+  },
+  noClassTitle: { fontSize: FONTS.sizes.lg, fontWeight: '800', color: COLORS.textPrimary },
+  noClassSub:   { fontSize: FONTS.sizes.sm, color: COLORS.textMuted, textAlign: 'center', lineHeight: 20 },
+  changeDateBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: COLORS.primary, paddingHorizontal: 16,
+    paddingVertical: 10, borderRadius: RADIUS.lg, marginTop: SPACING.sm,
+  },
+  changeDateTxt: { fontSize: FONTS.sizes.sm, fontWeight: '800', color: COLORS.accent },
+});
