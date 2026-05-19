@@ -264,13 +264,17 @@ The Android package identifier is `com.andhrauniversity.universe`. The native An
 
 | Intro | Login | Student Home |
 |---|---|---|
-| ![Intro](./screenshots/intro.png) | ![Login](./screenshots/login.png) | ![Home](./screenshots/student_home.png) |
+| ![Intro](./screenshots/gem-intro.png) | ![Login](./screenshots/gem-login.png) | ![Home](./screenshots/gem-homescreen.png) |
 
-| Attendance | Faculty Timetable | Campus Navigation |
+| Student Attendance | Faculty Timetable | Campus Navigation |
 |---|---|---|
-| ![Attendance](./screenshots/attendance.png) | ![Timetable](./screenshots/timetable.png) | ![Navigation](./screenshots/navigation.png) |
+| ![Student Attendance](./screenshots/gem-studentattendence.png) | ![Timetable](./screenshots/gem-timetable.png) | ![Navigation](./screenshots/gem-navigation.png) |
 
-> Add screenshots to a `/screenshots` directory and update the paths above.
+| Events | Faculty Attendence | Discussions  |
+|---|---|---|
+| ![Events](./screenshots/gem-events.png) | ![Faculty Attendence](./screenshots/gem-attendencemark.png) | ![Discussion(Chat)](./screenshots/gem-chat.png) |
+
+
 
 ---
 
