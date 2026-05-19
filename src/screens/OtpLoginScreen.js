@@ -128,7 +128,7 @@ export default function OtpLoginScreen({ navigation }) {
                 : (
                   <>
                     <Ionicons name="send-outline" size={17} color={COLORS.primary} />
-                    <Text style={s.sendBtnText}>Send OTP</Text>
+                    <Text style={s.sendBtnText}>Receive OTP</Text>
                   </>
                 )
               }

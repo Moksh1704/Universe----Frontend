@@ -2,10 +2,10 @@ import React, { useState } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity, StatusBar,
 } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { SearchBar } from '../components/UIComponents';
 import { COLORS, FONTS, SPACING, RADIUS, SHADOWS } from '../constants/theme';
+import AppHeader from '../components/AppHeader';
 
 // ─── Campus Locations (from universe_navigation.xlsx) ─────────────────────────
 const CAMPUS_LOCATIONS = [
@@ -96,54 +96,47 @@ const INDOOR_LOCATIONS = [
   { id: 'i43', name: 'Prof. B. Prajna', category: 'cabin', building: 'CSE Main Building', floor: 'Second Floor', room: 'Cab 30', department: 'CSE', lat: 17.7299687494293, lng: 83.318021708325, entrance: 'Enter from Dept Main gate', steps: 'Enter from the main entrance, take stairs to the left, go to the 2nd floor, go right — it\'s the 1st room to the right.', landmark: 'CSE Main entrance', keywords: 'cabin, faculty' },
 ];
 
-// ─── Category configs ─────────────────────────────────────────────────────────
-const CAMPUS_CAT = {
-  academic:       { icon: 'school-outline',        color: '#2471A3', label: 'Academic'   },
-  library:        { icon: 'library-outline',        color: '#117A65', label: 'Library'    },
-  innovation:     { icon: 'bulb-outline',           color: '#784212', label: 'Innovation' },
-  administration: { icon: 'business-outline',       color: '#6C3483', label: 'Admin'      },
-  health:         { icon: 'medkit-outline',         color: '#C0392B', label: 'Health'     },
-  food:           { icon: 'restaurant-outline',     color: '#D68910', label: 'Food'       },
-  bank:           { icon: 'card-outline',           color: '#1A5276', label: 'Bank'       },
-  entertainment:  { icon: 'musical-notes-outline',  color: '#7D6608', label: 'Events'     },
-  sports:         { icon: 'football-outline',       color: '#1E8449', label: 'Sports'     },
-  hostel:         { icon: 'home-outline',           color: '#5D6D7E', label: 'Hostel'     },
+// ─── Category icon/colour map ─────────────────────────────────────────────────
+const CAT_META = {
+  academic:       { icon: 'school-outline',        color: '#4F8EF7' },
+  library:        { icon: 'library-outline',        color: '#9B59B6' },
+  innovation:     { icon: 'bulb-outline',           color: '#F4A261' },
+  administration: { icon: 'business-outline',       color: '#2EC4B6' },
+  health:         { icon: 'medkit-outline',         color: '#E05C8A' },
+  food:           { icon: 'restaurant-outline',     color: '#27AE60' },
+  sports:         { icon: 'football-outline',       color: '#E67E22' },
+  entertainment:  { icon: 'musical-notes-outline',  color: '#C0392B' },
+  bank:           { icon: 'card-outline',           color: '#16A085' },
+  hostel:         { icon: 'home-outline',           color: '#8E44AD' },
+  lab:            { icon: 'desktop-outline',        color: '#2980B9' },
+  cabin:          { icon: 'person-outline',         color: '#D68910' },
 };
+const getMeta = (cat) => CAT_META[cat] || { icon: 'location-outline', color: COLORS.primary };
 
-const INDOOR_CAT = {
-  classroom:      { icon: 'school-outline',    color: '#2471A3', label: 'Classroom' },
-  lab:            { icon: 'flask-outline',     color: '#117A65', label: 'Lab'       },
-  cabin:          { icon: 'person-outline',    color: '#6C3483', label: 'Faculty'   },
-  washroom:       { icon: 'water-outline',     color: '#5D6D7E', label: 'Washroom'  },
-  office:         { icon: 'briefcase-outline', color: '#784212', label: 'Office'    },
-  'seminar hall': { icon: 'people-outline',    color: '#C0392B', label: 'Seminar'   },
-};
-
-// ─── Campus Location Card ─────────────────────────────────────────────────────
+// ─── Campus Card ──────────────────────────────────────────────────────────────
 const CampusCard = ({ loc, onPress }) => {
-  const cat = CAMPUS_CAT[loc.category] || { icon: 'location-outline', color: COLORS.primary };
+  const { icon, color } = getMeta(loc.category);
   return (
-    <TouchableOpacity style={st.locCard} onPress={() => onPress(loc)} activeOpacity={0.85}>
-      <View style={[st.locIcon, { backgroundColor: cat.color + '18' }]}>
-        <Ionicons name={cat.icon} size={20} color={cat.color} />
+    <TouchableOpacity style={st.locCard} onPress={() => onPress(loc)} activeOpacity={0.8}>
+      <View style={[st.locIcon, { backgroundColor: color + '18' }]}>
+        <Ionicons name={icon} size={22} color={color} />
       </View>
       <View style={{ flex: 1 }}>
         <Text style={st.locName} numberOfLines={1}>{loc.name}</Text>
         <Text style={st.locMeta}>{loc.description}</Text>
       </View>
-      <Ionicons name="navigate-circle-outline" size={26} color={COLORS.accent} />
+      <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
     </TouchableOpacity>
   );
 };
 
-// ─── Indoor Location Card ─────────────────────────────────────────────────────
+// ─── Indoor Card ──────────────────────────────────────────────────────────────
 const IndoorCard = ({ loc, onPress }) => {
-  const catKey = (loc.category || '').toLowerCase();
-  const cat = INDOOR_CAT[catKey] || { icon: 'location-outline', color: COLORS.primary };
+  const { icon, color } = getMeta(loc.category);
   return (
-    <TouchableOpacity style={st.locCard} onPress={() => onPress(loc)} activeOpacity={0.85}>
-      <View style={[st.locIcon, { backgroundColor: cat.color + '18' }]}>
-        <Ionicons name={cat.icon} size={20} color={cat.color} />
+    <TouchableOpacity style={st.locCard} onPress={() => onPress(loc)} activeOpacity={0.8}>
+      <View style={[st.locIcon, { backgroundColor: color + '18' }]}>
+        <Ionicons name={icon} size={22} color={color} />
       </View>
       <View style={{ flex: 1 }}>
         <Text style={st.locName} numberOfLines={1}>{loc.name}</Text>
@@ -155,12 +148,10 @@ const IndoorCard = ({ loc, onPress }) => {
 };
 
 // ─── Main Screen ──────────────────────────────────────────────────────────────
-// ✅ CHANGE: Accept `navigation` prop from React Navigation stack
 export default function NavigationScreen({ navigation }) {
   const [tab,    setTab]    = useState('campus');   // 'campus' | 'CSE Indoor'
   const [search, setSearch] = useState('');
 
-  // ✅ CHANGE: Instead of setSelected, push to NavigationDetailScreen
   const openDetail = (loc, type) => {
     navigation.navigate('NavigationDetailScreen', { location: loc, type });
   };
@@ -188,11 +179,10 @@ export default function NavigationScreen({ navigation }) {
     <View style={st.container}>
       <StatusBar barStyle="light-content" />
 
-      {/* Header */}
-      <LinearGradient colors={[COLORS.primary, COLORS.primaryLight]} style={st.header}>
-        <Text style={st.headerTitle}>Campus Map</Text>
-        <Text style={st.headerSub}>Navigate Andhra University · {CAMPUS_LOCATIONS.length + INDOOR_LOCATIONS.length} locations</Text>
-      </LinearGradient>
+      <AppHeader
+        title="Campus Map"
+        subtitle={`Navigate your campus`}
+      />
 
       <View style={st.body}>
         {/* Search */}
@@ -205,6 +195,7 @@ export default function NavigationScreen({ navigation }) {
             onPress={() => { setTab('campus'); setSearch(''); }}
             activeOpacity={0.8}
           >
+            <Ionicons name="map-outline" size={15} color={tab === 'campus' ? COLORS.secondary : COLORS.textSecondary} />
             <Text style={[st.tabBtnTxt, tab === 'campus' && st.tabBtnTxtActive]}>
               Campus  ({CAMPUS_LOCATIONS.length})
             </Text>
@@ -249,9 +240,6 @@ export default function NavigationScreen({ navigation }) {
 // ─── Styles ───────────────────────────────────────────────────────────────────
 const st = StyleSheet.create({
   container:    { flex: 1, backgroundColor: COLORS.bgLight },
-  header:       { paddingTop: 62, paddingBottom: SPACING.xl, paddingHorizontal: SPACING.lg },
-  headerTitle:  { fontSize: FONTS.sizes.xxxl, fontWeight: '900', color: COLORS.secondary },
-  headerSub:    { fontSize: FONTS.sizes.sm, color: 'rgba(255,255,255,0.6)', marginTop: 4 },
   body:         { flex: 1, padding: SPACING.md, gap: SPACING.sm },
 
   tabSwitcher:     { flexDirection: 'row', backgroundColor: COLORS.cardBg, borderRadius: RADIUS.full, padding: 3, borderWidth: 1, borderColor: COLORS.cardBorder },

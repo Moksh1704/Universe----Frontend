@@ -106,9 +106,9 @@ export default function ForgotPasswordScreen({ navigation }) {
 
           {step === 1 ? (
             <>
-              <Field label="University Email" icon="mail-outline" value={email} onChange={setEmail}
+              <Field label="Enter Email" icon="mail-outline" value={email} onChange={setEmail}
                 placeholder="Enter your email" autoFocus />
-              <PrimaryBtn label="Send OTP" onPress={handleSendOTP} loading={loading} />
+              <PrimaryBtn label="Receive OTP" onPress={handleSendOTP} loading={loading} />
             </>
           ) : (
             <>

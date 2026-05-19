@@ -1,19 +1,87 @@
-import { apiRequest } from '../../api/api';
-import BASE_URL from '../../api/config';
-import { getToken } from '../../api/storage';
+/**
+ * src/services/profileService.js
+ *
+ * Avatar upload + delete helpers, plus fetchProfile.
+ */
 
-export const fetchProfile = () => apiRequest('/users/me');
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
-export const uploadProfilePicture = async (uri) => {
-  const token = await getToken();
-  const formData = new FormData();
-  formData.append('file', { uri, type: 'image/jpeg', name: 'profile.jpg' });
-  const res = await fetch(`${BASE_URL}/users/me/avatar`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'multipart/form-data' },
-    body: formData,
+const BASE_URL = 'https://universe-mainbackend.onrender.com';
+
+// ── Auth header helper ────────────────────────────────────────────────────────
+async function getAuthHeaders() {
+  const token = await AsyncStorage.getItem('auth_access_token');
+  if (!token) throw new Error('Not authenticated');
+  return { Authorization: `Bearer ${token}` };
+}
+
+// ── Generic API request helper ────────────────────────────────────────────────
+export async function apiRequest(path, options = {}) {
+  const authHeaders = await getAuthHeaders();
+  const res = await fetch(`${BASE_URL}${path}`, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...authHeaders,
+      ...(options.headers || {}),
+    },
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.detail || 'Upload failed');
-  return data;
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Request failed (${res.status})`);
+  }
+
+  return res.json();
+}
+
+// ── Fetch current user profile ────────────────────────────────────────────────
+export const fetchProfile = async () => {
+  return apiRequest('/users/me');
 };
+
+// ── Upload avatar ─────────────────────────────────────────────────────────────
+/**
+ * @param {string} localUri  - local file URI from ImagePicker
+ * @param {string} mimeType  - e.g. 'image/jpeg'
+ * @returns {Promise<string>} - absolute avatar URL returned by server
+ */
+export async function uploadProfilePicture(localUri, mimeType = 'image/jpeg') {
+  const headers = await getAuthHeaders();
+
+  const filename = localUri.split('/').pop();
+  const ext      = filename.split('.').pop()?.toLowerCase() || 'jpg';
+  const type     = mimeType || `image/${ext === 'jpg' ? 'jpeg' : ext}`;
+
+  const form = new FormData();
+  form.append('file', { uri: localUri, name: filename, type });
+
+  const res = await fetch(`${BASE_URL}/users/upload-avatar`, {
+    method:  'POST',
+    headers: { ...headers },  // Do NOT set Content-Type — let fetch set multipart boundary
+    body:    form,
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Upload failed (${res.status})`);
+  }
+
+  const data = await res.json();
+  return data.avatarUrl;  // full absolute URL
+}
+
+// ── Delete avatar ─────────────────────────────────────────────────────────────
+export async function deleteProfilePicture() {
+  const headers = await getAuthHeaders();
+
+  const res = await fetch(`${BASE_URL}/users/avatar`, {
+    method:  'DELETE',
+    headers: { ...headers, 'Content-Type': 'application/json' },
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Delete failed (${res.status})`);
+  }
+}

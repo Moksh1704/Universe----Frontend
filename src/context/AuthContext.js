@@ -1,21 +1,42 @@
 /**
  * src/context/AuthContext.js
- * - Avatar persists across logout/login via AsyncStorage
- * - On session restore and new login, loads saved avatar if backend doesn't return one
- * - updateUser() auto-saves avatar_url changes to storage
- * - user.id is always persisted and restored correctly via saveAuthSession
- * - normalizeUser() ensures registration_number is ALWAYS populated from either
- *   snake_case or camelCase backend field; camelCase alias is then removed.
+ *
+ * Source of truth for authentication and user state.
+ *
+ * API shape (from app/schemas/__init__.py → UserProfileResponse / CamelModel):
+ *   avatarUrl            → stored as avatar_url
+ *   registrationNumber   → stored as registration_number
+ *   isActive             → stored as is_active
+ *   createdAt            → stored as created_at
+ *   overallAttendance    → stored as overall_attendance
+ *   nickname             → short/preferred name from master DB (e.g. "Moksha")
+ *   name                 → full display name (e.g. "SAI MOKSHA NAIMISHA NAMBURU")
+ *
+ * Startup flow:
+ *   1. Restore cached token + user from AsyncStorage (instant)
+ *   2. If token exists → fetchProfile() for fresh data (one API call, globally shared)
+ *   3. HomeScreen reads nickname directly — no Profile visit needed
  */
-import React, { createContext, useContext, useReducer, useEffect, useCallback } from 'react';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getAuthSession, saveAuthSession, clearAuthSession } from '../../api/storage';
 
-const AVATAR_KEY = 'user_avatar_uri';
+import React, {
+  createContext,
+  useContext,
+  useReducer,
+  useEffect,
+  useCallback,
+} from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { fetchProfile } from '../services/profileService';  // ← named import
+
+// ─── Storage key constants (single source of truth) ──────────────────────────
+export const STORAGE_KEYS = {
+  ACCESS_TOKEN:  'auth_access_token',
+  REFRESH_TOKEN: 'auth_refresh_token',
+  USER:          'user',
+  AVATAR:        'user_avatar_uri',
+};
 
 // ─── Field normalizer ─────────────────────────────────────────────────────────
-// Guarantees ONE canonical field: registration_number (snake_case).
-// Removes registrationNumber so nothing else in the app can accidentally use it.
 function normalizeUser(user) {
   if (!user) return user;
 
@@ -24,14 +45,80 @@ function normalizeUser(user) {
     (user.registrationNumber  && String(user.registrationNumber).trim())  ||
     '';
 
-  // Destructure out registrationNumber so it never reaches state / storage
-  // eslint-disable-next-line no-unused-vars
-  const { registrationNumber, ...rest } = user;
+  const avatar_url =
+    user.avatar_url  ||
+    user.avatarUrl   ||
+    null;
 
-  return { ...rest, registration_number };
+  const is_active =
+    user.is_active   !== undefined ? user.is_active  :
+    user.isActive    !== undefined ? user.isActive   :
+    true;
+
+  const overall_attendance =
+    user.overall_attendance !== undefined ? user.overall_attendance :
+    user.overallAttendance  !== undefined ? user.overallAttendance  :
+    null;
+
+  const created_at =
+    user.created_at || user.createdAt || null;
+
+  const nickname = user.nickname || '';
+
+  const {
+    registrationNumber,
+    avatarUrl,
+    isActive,
+    overallAttendance,
+    createdAt,
+    // eslint-disable-next-line no-unused-vars
+    ...rest
+  } = user;
+
+  return {
+    ...rest,
+    registration_number,
+    avatar_url,
+    is_active,
+    overall_attendance,
+    created_at,
+    nickname,
+  };
 }
 
-// ─── State ────────────────────────────────────────────────────────────────────
+// ─── Storage helpers ──────────────────────────────────────────────────────────
+const saveAuthSession = async ({ accessToken, refreshToken, user }) => {
+  await AsyncStorage.multiSet([
+    [STORAGE_KEYS.ACCESS_TOKEN,  accessToken   ?? ''],
+    [STORAGE_KEYS.REFRESH_TOKEN, refreshToken  ?? ''],
+    [STORAGE_KEYS.USER,          JSON.stringify(user ?? {})],
+  ]);
+};
+
+const getAuthSession = async () => {
+  const pairs = await AsyncStorage.multiGet([
+    STORAGE_KEYS.ACCESS_TOKEN,
+    STORAGE_KEYS.REFRESH_TOKEN,
+    STORAGE_KEYS.USER,
+  ]);
+  const map = Object.fromEntries(pairs.map(([k, v]) => [k, v]));
+  return {
+    accessToken:  map[STORAGE_KEYS.ACCESS_TOKEN]  || null,
+    refreshToken: map[STORAGE_KEYS.REFRESH_TOKEN] || null,
+    user:         map[STORAGE_KEYS.USER] ? JSON.parse(map[STORAGE_KEYS.USER]) : null,
+  };
+};
+
+const clearAuthSession = async () => {
+  await AsyncStorage.multiRemove([
+    STORAGE_KEYS.ACCESS_TOKEN,
+    STORAGE_KEYS.REFRESH_TOKEN,
+    STORAGE_KEYS.USER,
+    // AVATAR intentionally kept so it persists across re-login
+  ]);
+};
+
+// ─── Reducer ──────────────────────────────────────────────────────────────────
 const initialState = {
   isLoading:       true,
   isAuthenticated: false,
@@ -43,16 +130,21 @@ const initialState = {
 
 function authReducer(state, action) {
   switch (action.type) {
+
     case 'RESTORE_SESSION':
       return {
         ...state,
-        isLoading:       false,
+        isLoading:       true,
         isAuthenticated: !!action.accessToken,
         accessToken:     action.accessToken,
         refreshToken:    action.refreshToken,
         user:            action.user,
         role:            action.user?.role || null,
       };
+
+    case 'FINISH_LOADING':
+      return { ...state, isLoading: false };
+
     case 'LOGIN':
       return {
         ...state,
@@ -63,10 +155,17 @@ function authReducer(state, action) {
         user:            action.user,
         role:            action.user?.role || null,
       };
+
     case 'LOGOUT':
       return { ...initialState, isLoading: false };
+
     case 'UPDATE_USER':
-      return { ...state, user: { ...state.user, ...action.user } };
+      return {
+        ...state,
+        user: { ...state.user, ...action.user },
+        role: action.user?.role || state.role,
+      };
+
     default:
       return state;
   }
@@ -78,70 +177,138 @@ const AuthContext = createContext(null);
 export function AuthProvider({ children }) {
   const [state, dispatch] = useReducer(authReducer, initialState);
 
-  // ── Session restore on app launch ──────────────────────────────────────────
+  // ── Startup: restore session + fetch fresh profile ─────────────────────────
   useEffect(() => {
     (async () => {
       try {
         const session = await getAuthSession();
 
-        // Normalize immediately — guarantees registration_number is populated
-        let user = normalizeUser(session.user);
+        if (__DEV__) {
+          console.log('[Auth] Restoring session — token present:', !!session.accessToken);
+          console.log('[Auth] Cached user:', JSON.stringify(session.user));
+        }
 
-        // Restore persisted avatar if backend session doesn't include one
-        if (user && !user.avatar_url) {
-          const saved = await AsyncStorage.getItem(AVATAR_KEY).catch(() => null);
-          if (saved) user = { ...user, avatar_url: saved };
+        let cachedUser = normalizeUser(session.user);
+
+        if (cachedUser && !cachedUser.avatar_url) {
+          const saved = await AsyncStorage.getItem(STORAGE_KEYS.AVATAR).catch(() => null);
+          if (saved) cachedUser = { ...cachedUser, avatar_url: saved };
         }
 
         dispatch({
           type:         'RESTORE_SESSION',
           accessToken:  session.accessToken,
           refreshToken: session.refreshToken,
-          user,
+          user:         cachedUser,
         });
-      } catch {
+
+        if (session.accessToken) {
+          try {
+            if (__DEV__) console.log('[Auth] Fetching fresh user profile at startup…');
+
+            const freshUser  = await fetchProfile();   // GET /users/me
+            const normalized = normalizeUser(freshUser);
+
+            let resolvedUser = normalized;
+            if (!resolvedUser.avatar_url) {
+              const saved = await AsyncStorage.getItem(STORAGE_KEYS.AVATAR).catch(() => null);
+              if (saved) resolvedUser = { ...resolvedUser, avatar_url: saved };
+            }
+
+            if (__DEV__) {
+              console.log('[Auth] Fresh user loaded:', JSON.stringify(resolvedUser));
+            }
+
+            dispatch({ type: 'UPDATE_USER', user: resolvedUser });
+
+            await AsyncStorage.setItem(
+              STORAGE_KEYS.USER,
+              JSON.stringify(resolvedUser),
+            ).catch(() => {});
+
+            if (resolvedUser.avatar_url) {
+              await AsyncStorage.setItem(
+                STORAGE_KEYS.AVATAR,
+                resolvedUser.avatar_url,
+              ).catch(() => {});
+            }
+
+          } catch (fetchErr) {
+            // Non-fatal — cached user already in state, app still works offline
+            console.warn('[Auth] Startup profile fetch failed (using cache):', fetchErr.message);
+          }
+        }
+
+      } catch (err) {
+        console.warn('[Auth] Session restore failed:', err);
         dispatch({ type: 'RESTORE_SESSION', accessToken: null, refreshToken: null, user: null });
+      } finally {
+        dispatch({ type: 'FINISH_LOADING' });
       }
     })();
   }, []);
 
   // ── Login ──────────────────────────────────────────────────────────────────
-  const login = useCallback(async ({ accessToken, refreshToken, user }) => {
-    // Normalize immediately — registration_number is ready before any screen mounts
-    let resolvedUser = normalizeUser(user);
+  const login = useCallback(async ({ accessToken, refreshToken }) => {
+    await AsyncStorage.multiSet([
+      [STORAGE_KEYS.ACCESS_TOKEN,  accessToken  ?? ''],
+      [STORAGE_KEYS.REFRESH_TOKEN, refreshToken ?? ''],
+    ]);
 
-    // Restore saved avatar if backend doesn't return one
-    if (!resolvedUser?.avatar_url) {
-      const saved = await AsyncStorage.getItem(AVATAR_KEY).catch(() => null);
+    if (__DEV__) {
+      console.log('[Auth] Login — tokens saved, fetching full profile from /users/me…');
+    }
+
+    let fullUser;
+    try {
+      fullUser = await fetchProfile();
+    } catch (err) {
+      console.warn('[Auth] login: /users/me fetch failed:', err.message);
+      dispatch({ type: 'LOGIN', accessToken, refreshToken, user: null });
+      return;
+    }
+
+    let resolvedUser = normalizeUser(fullUser);
+
+    if (!resolvedUser.avatar_url) {
+      const saved = await AsyncStorage.getItem(STORAGE_KEYS.AVATAR).catch(() => null);
       if (saved) resolvedUser = { ...resolvedUser, avatar_url: saved };
     }
 
-    // Persist the normalized user (registrationNumber removed, registration_number set)
+    if (__DEV__) {
+      console.log('[Auth] Login — full user loaded:', JSON.stringify(resolvedUser));
+    }
+
     await saveAuthSession({ accessToken, refreshToken, user: resolvedUser });
+    if (resolvedUser.avatar_url) {
+      await AsyncStorage.setItem(STORAGE_KEYS.AVATAR, resolvedUser.avatar_url).catch(() => {});
+    }
+
     dispatch({ type: 'LOGIN', accessToken, refreshToken, user: resolvedUser });
   }, []);
 
   // ── Logout ─────────────────────────────────────────────────────────────────
   const logout = useCallback(async () => {
-    // Intentionally keep AVATAR_KEY so avatar persists after next login
     await clearAuthSession();
     dispatch({ type: 'LOGOUT' });
   }, []);
 
-  // ── Update user fields ─────────────────────────────────────────────────────
+  // ── Update user ────────────────────────────────────────────────────────────
   const updateUser = useCallback((userData) => {
-    // Normalize any incoming update too, in case a profile refetch returns camelCase
     const normalized = normalizeUser({ ...state.user, ...userData });
     dispatch({ type: 'UPDATE_USER', user: normalized });
+    AsyncStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(normalized)).catch(() => {});
     if (normalized.avatar_url) {
-      AsyncStorage.setItem(AVATAR_KEY, normalized.avatar_url).catch(() => {});
+      AsyncStorage.setItem(STORAGE_KEYS.AVATAR, normalized.avatar_url).catch(() => {});
     }
   }, [state.user]);
 
   const currentUserId = state.user?.id;
 
   return (
-    <AuthContext.Provider value={{ ...state, currentUserId, login, logout, updateUser }}>
+    <AuthContext.Provider
+      value={{ ...state, currentUserId, login, logout, updateUser }}
+    >
       {children}
     </AuthContext.Provider>
   );

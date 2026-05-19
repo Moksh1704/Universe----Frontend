@@ -14,10 +14,10 @@ import {
   ScrollView, StatusBar, ActivityIndicator, RefreshControl,
 } from 'react-native';
 import Svg, { Circle } from 'react-native-svg';
-import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../../context/AuthContext';
 import { COLORS, FONTS, SPACING, RADIUS, SHADOWS } from '../../../constants/theme';
+import AppHeader from '../../../components/AppHeader';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const MONTH_NAMES = [
@@ -382,10 +382,11 @@ export default function StudentAttendanceScreen() {
   return (
     <View style={s.root}>
       <StatusBar barStyle="light-content" />
-      <LinearGradient colors={[COLORS.primary, COLORS.primaryMid]} style={s.header}>
-        <Text style={s.headerTitle}>Attendance</Text>
-        <Text style={s.headerSub}>Track your attendance records</Text>
-      </LinearGradient>
+
+      <AppHeader
+        title="Attendance"
+        subtitle="Track your attendance records"
+      />
 
       {/* Tab switcher */}
       <View style={s.tabSwitcher}>
@@ -424,9 +425,6 @@ export default function StudentAttendanceScreen() {
 // ── Styles ────────────────────────────────────────────────────────────────────
 const s = StyleSheet.create({
   root:       { flex: 1, backgroundColor: COLORS.bgLight },
-  header:     { paddingTop: 62, paddingBottom: SPACING.lg, paddingHorizontal: SPACING.lg },
-  headerTitle:{ fontSize: FONTS.sizes.xxxl, fontWeight: '900', color: COLORS.secondary },
-  headerSub:  { fontSize: FONTS.sizes.sm, color: 'rgba(255,255,255,0.6)', marginTop: 4 },
 
   // Tabs
   tabSwitcher:     { flexDirection: 'row', margin: SPACING.md, backgroundColor: COLORS.cardBg, borderRadius: RADIUS.full, padding: 3, borderWidth: 1, borderColor: COLORS.cardBorder },

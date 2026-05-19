@@ -4,28 +4,63 @@ import {
   TextInput, KeyboardAvoidingView, Platform, StatusBar, Alert,
   ActivityIndicator,
 } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { apiRequest } from '../api/api';
 import { useAuth } from '../src/context/AuthContext';
 import { COLORS, FONTS, SPACING, RADIUS, SHADOWS } from '../constants/theme';
+import AppHeader from '../components/AppHeader';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-const fmtTime = (raw) => {
+/**
+ * normalizeTS(raw) → always returns a UTC-anchored ISO string.
+ *
+ * Problem solved: FastAPI may return naive UTC strings without a timezone
+ * suffix (e.g. "2026-04-27T05:00:00").  JavaScript's Date constructor
+ * treats those as LOCAL time, so an IST device reads 05:00 IST instead of
+ * 05:00 UTC — a silent +5:30 error.  Appending "Z" tells the parser it is
+ * UTC, which is what the backend always means.
+ *
+ * new Date().toISOString() already includes "Z", so optimistic messages are
+ * unaffected by this guard.
+ */
+const normalizeTS = (raw) =>
+  raw && !/[Z+\-]\d*$/.test(raw) ? `${raw}Z` : raw;
+
+/**
+ * formatTime(timestamp) — single reusable display function.
+ *
+ * • Accepts any ISO string (with or without timezone suffix).
+ * • Never does manual hour arithmetic — JavaScript Date + Intl handles it.
+ * • Returns WhatsApp-style time: "10:30 AM" for today,
+ *   "27 Apr, 10:30 AM" for older messages.
+ */
+const formatTime = (raw) => {
   if (!raw) return '';
-  const d = new Date(raw);
-  if (isNaN(d.getTime())) return raw;
-  const now = new Date();
+  const ts = normalizeTS(raw);
+  const d  = new Date(ts);
+  if (isNaN(d.getTime())) return '';
+
+  const now     = new Date();
   const isToday =
-    d.getDate() === now.getDate() &&
-    d.getMonth() === now.getMonth() &&
+    d.getDate()     === now.getDate()  &&
+    d.getMonth()    === now.getMonth() &&
     d.getFullYear() === now.getFullYear();
+
+  // Let JS/Intl resolve the user's local timezone automatically — no manual offset.
   if (isToday) {
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   }
-  return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+  // Older message: "27 Apr, 10:30 AM"
+  return d.toLocaleString([], {
+    day:    '2-digit',
+    month:  'short',
+    hour:   '2-digit',
+    minute: '2-digit',
+  });
 };
+
+const IST = 'Asia/Kolkata';
 
 const getInitials = (name = '') =>
   name.split(' ').map((n) => n[0]).join('').slice(0, 2).toUpperCase() || '?';
@@ -52,13 +87,20 @@ const DateSeparator = ({ label }) => (
 );
 
 const dateSepLabel = (raw) => {
-  const d = new Date(raw);
+  if (!raw) return '';
+  const d = new Date(normalizeTS(raw));
   if (isNaN(d.getTime())) return '';
-  const now = new Date();
-  const diff = Math.floor((now - d) / 86400000);
+
+  // Compare calendar dates in IST, not UTC.
+  const msgIST = d.toLocaleDateString('en-IN', { timeZone: IST });
+  const nowIST = new Date().toLocaleDateString('en-IN', { timeZone: IST });
+
+  const toMidnight = (s) => { const [dd, mm, yyyy] = s.split('/'); return new Date(`${yyyy}-${mm}-${dd}`); };
+  const diff = Math.floor((toMidnight(nowIST) - toMidnight(msgIST)) / 86400000);
+
   if (diff === 0) return 'Today';
   if (diff === 1) return 'Yesterday';
-  return d.toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' });
+  return d.toLocaleDateString('en-IN', { timeZone: IST, day: 'numeric', month: 'long', year: 'numeric' });
 };
 
 // ── MessageBubble ─────────────────────────────────────────────────────────────
@@ -106,7 +148,7 @@ const MessageBubble = ({ msg, isMine, showAvatar, onLongPress }) => {
         )}
 
         <Text style={[s.bubbleTime, isMine && s.bubbleTimeMine, isDeleted && s.bubbleTimeDeleted]}>
-          {fmtTime(msg.created_at)}
+          {formatTime(msg.created_at)}
         </Text>
       </View>
 
@@ -128,9 +170,28 @@ export default function DiscussionScreen() {
   const [error,      setError]      = useState(null);
   const listRef = useRef(null);
 
-  // Fetch on mount
+  // Fetch on mount + poll every 3 s for real-time updates
   useEffect(() => {
     fetchMessages();
+
+    const poll = setInterval(async () => {
+      try {
+        const data = await apiRequest('/posts');
+        if (!Array.isArray(data)) return;
+        setMessages((prev) => {
+          // Skip re-render if length and every id+is_deleted are identical
+          if (
+            prev.length === data.length &&
+            prev.every((m, i) => m.id === data[i].id && m.is_deleted === data[i].is_deleted)
+          ) return prev;
+          return data;
+        });
+      } catch {
+        // Silent — polling errors don't interrupt the UI
+      }
+    }, 3000);
+
+    return () => clearInterval(poll); // cleanup on unmount
   }, []);
 
   const fetchMessages = async () => {
@@ -234,7 +295,10 @@ export default function DiscussionScreen() {
   const renderList = [];
   let lastDate = null;
   messages.forEach((msg, idx) => {
-    const msgDate = msg.created_at ? new Date(msg.created_at).toDateString() : null;
+    const msgDate = msg.created_at
+      ? new Date(normalizeTS(msg.created_at))
+          .toLocaleDateString('en-IN', { timeZone: IST })
+      : null;
     if (msgDate && msgDate !== lastDate) {
       renderList.push({ _type: 'separator', id: `sep_${msgDate}`, label: dateSepLabel(msg.created_at) });
       lastDate = msgDate;
@@ -242,7 +306,7 @@ export default function DiscussionScreen() {
     const prev = messages[idx - 1];
     const showAvatar = !prev || prev.user_name !== msg.user_name ||
       (msg.created_at && prev.created_at &&
-        new Date(msg.created_at) - new Date(prev.created_at) > 5 * 60 * 1000);
+        new Date(normalizeTS(msg.created_at)) - new Date(normalizeTS(prev.created_at)) > 5 * 60 * 1000);
     renderList.push({ ...msg, _type: 'message', _showAvatar: showAvatar });
   });
 
@@ -271,19 +335,11 @@ export default function DiscussionScreen() {
     <View style={s.container}>
       <StatusBar barStyle="light-content" />
 
-      {/* ── Header (unchanged from original) ── */}
-      <LinearGradient colors={[COLORS.primary, COLORS.primaryMid]} style={s.header}>
-        <View style={s.headerInner}>
-          <View>
-            <Text style={s.headerTitle}>Discussion</Text>
-            <Text style={s.headerSub}>Share &amp; request study materials</Text>
-          </View>
-          <View style={s.headerBadge}>
-            <Ionicons name="people" size={16} color={COLORS.secondary} />
-            <Text style={s.headerBadgeTxt}>Campus Chat</Text>
-          </View>
-        </View>
-      </LinearGradient>
+      <AppHeader
+        title="Discussion"
+        subtitle="Connect with students across campus"
+        
+      />
 
       {/* ── Content area ── */}
       <KeyboardAvoidingView
@@ -363,11 +419,7 @@ export default function DiscussionScreen() {
 const s = StyleSheet.create({
   container:       { flex: 1, backgroundColor: COLORS.bgLight },
 
-  // Header — kept identical to original FeedScreen header structure
-  header:          { paddingTop: 62, paddingBottom: SPACING.lg, paddingHorizontal: SPACING.lg },
-  headerInner:     { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-end' },
-  headerTitle:     { fontSize: FONTS.sizes.xxxl, fontWeight: '900', color: COLORS.secondary },
-  headerSub:       { fontSize: FONTS.sizes.xs, color: 'rgba(255,255,255,0.6)', marginTop: 4 },
+  // Header badge (passed as rightComponent)
   headerBadge:     { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: RADIUS.full, paddingHorizontal: 10, paddingVertical: 5 },
   headerBadgeTxt:  { fontSize: FONTS.sizes.xs, color: COLORS.secondary, fontWeight: '700' },
 

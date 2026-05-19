@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useRef } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, StatusBar, Image,
 } from 'react-native';
@@ -13,12 +13,50 @@ const ROLES = [
 ];
 
 export default function RoleSelectionScreen({ navigation }) {
+  // Guard: if navigation is somehow undefined (edge case in prod), fail silently
+  if (!navigation) return null;
+
+  // Prevent double-tap triggering multiple navigations
+  const isNavigating = useRef(false);
 
   const handleSelect = async (role) => {
+    // Guard: invalid role or already navigating
+    if (!role || isNavigating.current) return;
+    isNavigating.current = true;
+
     try {
-      await AsyncStorage.setItem('role', role);
-    } catch (_) {}
-    navigation.navigate('Login', { role });
+      await AsyncStorage.setItem('userRole', role);
+      console.log('[RoleSelection] Role saved to AsyncStorage:', role);
+    } catch (storageError) {
+      // Non-fatal: log and continue — navigation should still proceed
+      console.warn('[RoleSelection] AsyncStorage write failed:', storageError?.message ?? storageError);
+    }
+
+    try {
+      // requestAnimationFrame defers navigation by one frame — prevents
+      // navigator state mutation crashes in production APK (EAS build)
+      // where JS executes faster than Expo Go's dev bundle.
+      // replace() is used instead of navigate() to:
+      //   1. Remove RoleSelectionScreen from the stack (no back to role picker after login)
+      //   2. Prevent double-mount / back-navigation race conditions in prod
+      requestAnimationFrame(() => {
+        navigation.replace('Login', { role });
+      });
+    } catch (navError) {
+      console.error('[RoleSelection] Navigation to Login failed:', navError?.message ?? navError);
+      // Reset flag so user can retry
+      isNavigating.current = false;
+    }
+  };
+
+  const handleBack = () => {
+    try {
+      if (navigation.canGoBack()) {
+        navigation.goBack();
+      }
+    } catch (err) {
+      console.warn('[RoleSelection] goBack failed:', err?.message ?? err);
+    }
   };
 
   return (
@@ -30,8 +68,8 @@ export default function RoleSelectionScreen({ navigation }) {
         colors={[COLORS.primary, COLORS.primaryMid, COLORS.primaryLight]}
         style={s.header}
       >
-        {/* 🔥 Back Button (same as Login) */}
-        <TouchableOpacity onPress={() => navigation.goBack()} style={s.backBtn}>
+        {/* Back Button */}
+        <TouchableOpacity onPress={handleBack} style={s.backBtn}>
           <Ionicons name="arrow-back" size={20} color="rgba(255,255,255,0.85)" />
         </TouchableOpacity>
 

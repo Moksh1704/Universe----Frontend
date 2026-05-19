@@ -2,6 +2,7 @@
   "expo": {
     "name": "UniVerse",
     "slug": "universe-au",
+    "owner": "karthik2569",
     "scheme": "universe",
     "version": "1.0.0",
     "sdkVersion": "54.0.0",
@@ -38,12 +39,11 @@
     "plugins": [
       "expo-audio",
       "expo-video",
-      "expo-web-browser",
-      "@react-native-google-signin/google-signin"
+      "expo-web-browser"
     ],
     "extra": {
       "eas": {
-        "projectId": "1e32bf59-f3c3-4303-9a96-6dea8e17178d"
+        "projectId": "af3319bd-b19e-4e2a-87fc-fc4f44793cbc"
       }
     }
   }
